@@ -1,4 +1,8 @@
-use std::{borrow::Borrow, mem, slice};
+use std::{
+    borrow::Borrow,
+    mem::{self, MaybeUninit},
+    slice,
+};
 
 #[derive(Clone, Debug, Default)]
 pub struct UntypedBytes {
@@ -6,12 +10,12 @@ pub struct UntypedBytes {
 }
 
 // unsafe to inspect the bytes after casting
-unsafe fn as_bytes<T: Copy + 'static>(value: &T) -> &[u8] {
+unsafe fn as_bytes<T: Copy + Send + Sync + 'static>(value: &T) -> &[u8] {
     slice::from_raw_parts(value as *const T as _, mem::size_of::<T>())
 }
 
 // unsafe to inspect the bytes after casting
-unsafe fn as_bytes_slice<T: Copy + 'static>(value: &[T]) -> &[u8] {
+unsafe fn as_bytes_slice<T: Copy + Send + Sync + 'static>(value: &[T]) -> &[u8] {
     slice::from_raw_parts(value.as_ptr() as _, mem::size_of_val(value))
 }
 
@@ -42,7 +46,7 @@ impl UntypedBytes {
 
     pub fn from_slice<T, V>(value: V) -> Self
     where
-        T: Copy + 'static,
+        T: Copy + Send + Sync + 'static,
         V: Borrow<[T]>,
     {
         let borrowed = value.borrow();
@@ -64,14 +68,14 @@ impl UntypedBytes {
         self.bytes.clear()
     }
 
-    pub fn push<T: Copy + 'static>(&mut self, value: T) {
+    pub fn push<T: Copy + Send + Sync + 'static>(&mut self, value: T) {
         let raw = unsafe { as_bytes(&value) };
         self.bytes.extend(raw)
     }
 
     pub fn extend_from_slice<T, V>(&mut self, value: V)
     where
-        T: Copy + 'static,
+        T: Copy + Send + Sync + 'static,
         V: Borrow<[T]>,
     {
         let raw = unsafe { as_bytes_slice(value.borrow()) };
@@ -79,21 +83,35 @@ impl UntypedBytes {
     }
 
     /// Returns a slice that is unsafe to inspect in the presence of padding bytes, but is safe to
-    /// `memcpy`.
+    /// `memcpy`. Additionally, alignment of the returned slice is the same as
+    /// `mem::align_of::<u8>()`.
     pub unsafe fn as_slice(&self) -> &[u8] {
         &self.bytes
     }
-}
 
-impl<T: Copy + 'static> From<T> for UntypedBytes {
-    fn from(value: T) -> Self {
-        let mut result = Self::with_capacity(mem::size_of::<T>());
-        result.push(value);
-        result
+    /// Casts the backing bytes to a value of type `T`. This is only safe the backing bytes were
+    /// created from a value of type `T`.
+    pub unsafe fn cast<T: Copy + Send + Sync + 'static>(&self) -> T {
+        debug_assert_eq!(
+            mem::size_of::<T>(),
+            self.len(),
+            "Attempt to cast `UntypedBytes` to a value of a different size"
+        );
+        let mut result = MaybeUninit::uninit();
+        self.as_slice()
+            .as_ptr()
+            .copy_to_nonoverlapping(result.as_mut_ptr() as *mut u8, mem::size_of::<T>());
+        result.assume_init()
     }
 }
 
-impl<A: Copy + 'static> Extend<A> for UntypedBytes {
+impl<T: Copy + Send + Sync + 'static> From<T> for UntypedBytes {
+    fn from(value: T) -> Self {
+        Self::from_vec(vec![value])
+    }
+}
+
+impl<A: Copy + Send + Sync + 'static> Extend<A> for UntypedBytes {
     fn extend<T: IntoIterator<Item = A>>(&mut self, value: T) {
         self.bytes
             .extend(value.into_iter().flat_map(|value| ByteIter::from(value)))
@@ -101,18 +119,18 @@ impl<A: Copy + 'static> Extend<A> for UntypedBytes {
 }
 
 #[derive(Clone)]
-struct ByteIter<T: Copy + 'static> {
+struct ByteIter<T: Copy + Send + Sync + 'static> {
     value: T,
     cur: usize,
 }
 
-impl<T: Copy + 'static> From<T> for ByteIter<T> {
+impl<T: Copy + Send + Sync + 'static> From<T> for ByteIter<T> {
     fn from(value: T) -> Self {
         Self { value, cur: 0 }
     }
 }
 
-impl<T: Copy + 'static> Iterator for ByteIter<T> {
+impl<T: Copy + Send + Sync + 'static> Iterator for ByteIter<T> {
     type Item = u8;
 
     fn next(&mut self) -> Option<u8> {
@@ -131,4 +149,4 @@ impl<T: Copy + 'static> Iterator for ByteIter<T> {
     }
 }
 
-impl<T: Copy + 'static> ExactSizeIterator for ByteIter<T> {}
+impl<T: Copy + Send + Sync + 'static> ExactSizeIterator for ByteIter<T> {}
