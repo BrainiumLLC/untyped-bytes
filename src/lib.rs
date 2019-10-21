@@ -10,11 +10,13 @@ pub struct UntypedBytes {
 }
 
 // unsafe to inspect the bytes after casting
+#[inline]
 unsafe fn as_bytes<T: Copy + Send + Sync + 'static>(value: &T) -> &[u8] {
     slice::from_raw_parts(value as *const T as _, mem::size_of::<T>())
 }
 
 // unsafe to inspect the bytes after casting
+#[inline]
 unsafe fn as_bytes_slice<T: Copy + Send + Sync + 'static>(value: &[T]) -> &[u8] {
     slice::from_raw_parts(value.as_ptr() as _, mem::size_of_val(value))
 }
@@ -73,6 +75,7 @@ impl UntypedBytes {
         self.bytes.extend(raw)
     }
 
+    #[inline]
     pub fn extend_from_slice<T, V>(&mut self, value: V)
     where
         T: Copy + Send + Sync + 'static,
@@ -112,41 +115,40 @@ impl<T: Copy + Send + Sync + 'static> From<T> for UntypedBytes {
 }
 
 impl<A: Copy + Send + Sync + 'static> Extend<A> for UntypedBytes {
+    #[inline]
     fn extend<T: IntoIterator<Item = A>>(&mut self, value: T) {
-        self.bytes
-            .extend(value.into_iter().flat_map(|value| ByteIter::from(value)))
-    }
-}
-
-#[derive(Clone)]
-struct ByteIter<T: Copy + Send + Sync + 'static> {
-    value: T,
-    cur: usize,
-}
-
-impl<T: Copy + Send + Sync + 'static> From<T> for ByteIter<T> {
-    fn from(value: T) -> Self {
-        Self { value, cur: 0 }
-    }
-}
-
-impl<T: Copy + Send + Sync + 'static> Iterator for ByteIter<T> {
-    type Item = u8;
-
-    fn next(&mut self) -> Option<u8> {
-        if self.cur < mem::size_of::<T>() {
-            let prev = self.cur;
-            self.cur += 1;
-            Some(unsafe { as_bytes(&self.value).get_unchecked(prev).clone() })
+        if std::any::type_name::<T>()
+            == std::any::type_name::<std::iter::Copied<std::slice::Iter<'_, A>>>()
+        {
+            let raw = unsafe { mem::transmute_copy::<_, std::slice::Iter<'_, A>>(&value) };
+            self.extend_from_slice(raw.as_slice())
+        } else if std::any::type_name::<T>()
+            == std::any::type_name::<std::iter::Cloned<std::slice::Iter<'_, A>>>()
+        {
+            let raw = unsafe { mem::transmute_copy::<_, std::slice::Iter<'_, A>>(&value) };
+            self.extend_from_slice(raw.as_slice())
+        } else if std::any::type_name::<T>()
+            == std::any::type_name::<std::iter::Copied<std::slice::IterMut<'_, A>>>()
+        {
+            let raw = unsafe { mem::transmute_copy::<_, std::slice::IterMut<'_, A>>(&value) };
+            self.extend_from_slice(raw.into_slice())
+        } else if std::any::type_name::<T>()
+            == std::any::type_name::<std::iter::Cloned<std::slice::IterMut<'_, A>>>()
+        {
+            let raw = unsafe { mem::transmute_copy::<_, std::slice::IterMut<'_, A>>(&value) };
+            self.extend_from_slice(raw.into_slice())
+        } else if std::any::type_name::<T>() == std::any::type_name::<std::vec::IntoIter<A>>() {
+            let raw = unsafe { mem::transmute_copy::<_, std::vec::IntoIter<A>>(&value) };
+            std::mem::forget(value);
+            self.extend_from_slice(raw.as_slice())
+        } else if std::any::type_name::<T>() == std::any::type_name::<Vec<A>>() {
+            let raw = unsafe { mem::transmute_copy::<_, Vec<A>>(&value) };
+            std::mem::forget(value);
+            self.extend_from_slice(raw.as_slice())
         } else {
-            None
+            for elem in value {
+                self.push(elem)
+            }
         }
     }
-
-    fn size_hint(&self) -> (usize, Option<usize>) {
-        let size = mem::size_of::<T>() - self.cur;
-        (size, Some(size))
-    }
 }
-
-impl<T: Copy + Send + Sync + 'static> ExactSizeIterator for ByteIter<T> {}
